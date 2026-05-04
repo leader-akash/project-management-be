@@ -10,10 +10,13 @@ async function listUsers(query = {}) {
     ];
   }
 
+  const rawLimit = Number.parseInt(String(query.limit ?? ""), 10);
+  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 500) : 200;
+
   return User.find(filter)
     .select("name email role lastSeenAt")
     .sort({ name: 1 })
-    .limit(50);
+    .limit(limit);
 }
 
 module.exports = {
