@@ -1,7 +1,9 @@
 const Project = require("../models/Project");
+const User = require("../models/User");
 const { Task, DEFAULT_TASK_STATUSES } = require("../models/Task");
 const activityService = require("./activity.service");
 const ApiError = require("../utils/ApiError");
+const { toTitleCase } = require("../utils/titleCase");
 const {
   assertPermission,
   canReadProject,
@@ -29,6 +31,55 @@ function ensureAssignable(project, assigneeId) {
   const membership = getMembership(project, assigneeId);
   if (!membership) {
     throw new ApiError(400, "Assignee must be a member of this project.");
+  }
+}
+
+/**
+ * Workspace admins may be assignees only when the actor is also a workspace admin.
+ * Unchanged assignee (same id as before) is always allowed so others can edit the task.
+ */
+function toUtcCalendarYmd(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+function utcTodayYmd() {
+  return toUtcCalendarYmd(new Date());
+}
+
+function assertDueDateNotInPast(dueDate, previousDueDate) {
+  if (dueDate == null) return;
+  const d = dueDate instanceof Date ? dueDate : new Date(dueDate);
+  if (Number.isNaN(d.getTime())) {
+    throw new ApiError(400, "Invalid due date.");
+  }
+  const ymd = toUtcCalendarYmd(d);
+  const today = utcTodayYmd();
+  if (ymd >= today) return;
+  if (previousDueDate != null) {
+    const prevYmd = toUtcCalendarYmd(previousDueDate);
+    if (prevYmd && prevYmd === ymd) return;
+  }
+  throw new ApiError(400, "Due date cannot be in the past.");
+}
+
+async function assertAssigneePolicy(assigneeId, actorUser, previousAssigneeId = null) {
+  if (!assigneeId) return;
+  if (actorUser?.role === "admin") return;
+
+  const nextId = assigneeId.toString();
+  if (previousAssigneeId != null && String(previousAssigneeId) === nextId) {
+    return;
+  }
+
+  const assignee = await User.findById(assigneeId).select("role");
+  if (!assignee) {
+    throw new ApiError(400, "Assignee was not found.");
+  }
+  if (assignee.role === "admin") {
+    throw new ApiError(403, "Only a workspace admin can assign work to an admin.");
   }
 }
 
@@ -78,6 +129,8 @@ async function getTaskById(taskId, user, write = false) {
 async function createTask(projectId, payload, user) {
   const project = await loadProject(projectId, user, true);
   ensureAssignable(project, payload.assignee);
+  await assertAssigneePolicy(payload.assignee, user);
+  assertDueDateNotInPast(payload.dueDate, null);
 
   const status = payload.status || "todo";
   assertValidTaskStatus(project, status);
@@ -93,7 +146,7 @@ async function createTask(projectId, payload, user) {
   try {
     task = await Task.create({
       project: projectId,
-      title: payload.title,
+      title: toTitleCase(payload.title),
       description: payload.description || "",
       status,
       priority: payload.priority || "medium",
@@ -120,7 +173,16 @@ async function updateTask(taskId, payload, user) {
   }
 
   const project = await loadProject(existingTask.project, user, true);
-  ensureAssignable(project, payload.assignee);
+
+  const previousAssigneeId = existingTask.assignee?._id ?? existingTask.assignee ?? null;
+  if (payload.assignee !== undefined) {
+    ensureAssignable(project, payload.assignee);
+    await assertAssigneePolicy(payload.assignee, user, previousAssigneeId);
+  }
+
+  if (payload.dueDate !== undefined) {
+    assertDueDateNotInPast(payload.dueDate, existingTask.dueDate);
+  }
 
   if (payload.expectedVersion !== undefined && payload.expectedVersion !== existingTask.version) {
     throw new ApiError(409, "Task has changed since you loaded it. Refresh and try again.", {
@@ -132,10 +194,13 @@ async function updateTask(taskId, payload, user) {
   assertValidTaskStatus(project, nextStatus);
   const update = {};
 
-  for (const field of ["title", "description", "status", "priority", "assignee", "dueDate", "position"]) {
+  for (const field of ["description", "status", "priority", "assignee", "dueDate", "position"]) {
     if (payload[field] !== undefined) {
       update[field] = payload[field];
     }
+  }
+  if (payload.title !== undefined) {
+    update.title = toTitleCase(payload.title);
   }
 
   if (payload.status && payload.status !== existingTask.status && payload.position === undefined) {

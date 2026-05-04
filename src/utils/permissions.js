@@ -22,11 +22,21 @@ function getMembership(project, userId) {
   return member?.role || null;
 }
 
+function isWorkspaceLead(user) {
+  return user?.role === "admin" || user?.role === "manager";
+}
+
 function canReadProject(project, user) {
+  if (isWorkspaceLead(user)) {
+    return true;
+  }
   return Boolean(getMembership(project, user._id));
 }
 
 function canManageProject(project, user) {
+  if (isWorkspaceLead(user)) {
+    return true;
+  }
   const membership = getMembership(project, user._id);
   return membership === PROJECT_ROLES.OWNER || membership === PROJECT_ROLES.MANAGER;
 }
@@ -55,14 +65,21 @@ function assertPermission(condition, message = "You do not have permission to pe
   }
 }
 
+/** Workspace-level: only admin and project managers (`manager`) may create new projects. */
+function canCreateWorkspaceProject(user) {
+  return user?.role === "admin" || user?.role === "manager";
+}
+
 module.exports = {
   PROJECT_ROLES,
   getMembership,
+  isWorkspaceLead,
   canReadProject,
   canManageProject,
   canDeleteProject,
   canWriteTasks,
   canComment,
-  assertPermission
+  assertPermission,
+  canCreateWorkspaceProject
 };
 

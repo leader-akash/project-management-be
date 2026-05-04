@@ -1,4 +1,5 @@
 const express = require("express");
+const adminRoutes = require("./admin.routes");
 const authRoutes = require("./auth.routes");
 const projectRoutes = require("./project.routes");
 const taskRoutes = require("./task.routes");
@@ -15,6 +16,7 @@ router.get("/health", (_req, res) => {
 });
 
 router.use("/auth", authRoutes);
+router.use("/admin", adminRoutes);
 router.use("/users", userRoutes);
 router.use("/projects", projectRoutes);
 router.use("/tasks", taskRoutes);

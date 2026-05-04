@@ -1,6 +1,8 @@
 const bcrypt = require("bcryptjs");
 const User = require("../models/User");
+const env = require("../config/env");
 const ApiError = require("../utils/ApiError");
+const { toTitleCase } = require("../utils/titleCase");
 const { signToken } = require("../utils/jwt");
 
 function publicUser(user) {
@@ -9,18 +11,32 @@ function publicUser(user) {
   return object;
 }
 
+function resolveRegisterRole(email, requestedRole, isFirstUser) {
+  const normalizedEmail = String(email || "").toLowerCase();
+  if (isFirstUser) {
+    return "admin";
+  }
+  if (env.COMPANY_ADMIN_EMAIL && normalizedEmail === env.COMPANY_ADMIN_EMAIL) {
+    return "admin";
+  }
+  return requestedRole === "manager" ? "manager" : "member";
+}
+
 async function register(payload) {
   const existingUser = await User.findOne({ email: payload.email });
   if (existingUser) {
     throw new ApiError(409, "An account with this email already exists.");
   }
 
+  const userCount = await User.countDocuments();
+  const isFirstUser = userCount === 0;
   const passwordHash = await bcrypt.hash(payload.password, 12);
+  const role = resolveRegisterRole(payload.email, payload.role, isFirstUser);
   const user = await User.create({
-    name: payload.name,
+    name: toTitleCase(payload.name),
     email: payload.email,
     passwordHash,
-    role: "member"
+    role
   });
 
   return {

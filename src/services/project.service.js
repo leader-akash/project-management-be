@@ -4,25 +4,75 @@ const ApiError = require("../utils/ApiError");
 const { getPagination } = require("../utils/pagination");
 const {
   assertPermission,
+  canCreateWorkspaceProject,
   canDeleteProject,
   canManageProject,
   canReadProject
 } = require("../utils/permissions");
+const { toTitleCase } = require("../utils/titleCase");
 
 const populateProject = [
   { path: "owner", select: "name email role" },
   { path: "members.user", select: "name email role" }
 ];
 
-function buildProjectKey(name, explicitKey) {
-  const source = explicitKey || name;
-  return source
+/** User-provided key: keep letters/digits only, uppercase (do not collapse to initials). */
+function sanitizeExplicitKey(raw) {
+  return String(raw || "")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toUpperCase()
+    .slice(0, 12);
+}
+
+/** Auto key from project title: initials of each word (when no explicit key). */
+function initialsKeyFromName(name) {
+  const source = String(name || "")
     .replace(/[^a-zA-Z0-9\s-]/g, "")
+    .trim();
+  if (!source) return "PROJ";
+  const initials = source
     .split(/\s+/)
+    .filter(Boolean)
     .map((part) => part.charAt(0))
     .join("")
     .slice(0, 12)
-    .toUpperCase() || "PROJ";
+    .toUpperCase();
+  return initials || "PROJ";
+}
+
+async function ensureUniqueProjectKey(base, excludeProjectId = null) {
+  let baseKey = (base || "PROJ").slice(0, 12).replace(/[^A-Z0-9]/g, "");
+  if (baseKey.length < 2) {
+    baseKey = `${baseKey}PR`.slice(0, 12);
+  }
+
+  for (let n = 0; n < 10000; n += 1) {
+    const candidate = (n === 0 ? baseKey : `${baseKey}${n}`).slice(0, 12);
+    const query = { key: candidate };
+    if (excludeProjectId) {
+      query._id = { $ne: excludeProjectId };
+    }
+    const taken = await Project.exists(query);
+    if (!taken) {
+      return candidate;
+    }
+  }
+
+  throw new ApiError(500, "Could not allocate a unique project key.");
+}
+
+async function resolveProjectKeyForCreate(payload) {
+  const explicit = payload.key && String(payload.key).trim();
+  if (explicit) {
+    const sanitized = sanitizeExplicitKey(payload.key);
+    if (sanitized.length < 2) {
+      throw new ApiError(400, "Project key must be at least 2 letters or numbers.");
+    }
+    return ensureUniqueProjectKey(sanitized);
+  }
+
+  const fromName = initialsKeyFromName(payload.name);
+  return ensureUniqueProjectKey(fromName.length >= 2 ? fromName : "PROJ");
 }
 
 const RESERVED_LANE_IDS = new Set(["todo", "in-progress", "review", "done"]);
@@ -64,9 +114,16 @@ function normalizeMembers(ownerId, members = []) {
 }
 
 async function createProject(payload, user) {
+  assertPermission(
+    canCreateWorkspaceProject(user),
+    "Only workspace admins and project managers can create projects."
+  );
+
+  const name = toTitleCase(payload.name);
+  const key = await resolveProjectKeyForCreate({ name, key: payload.key });
   const project = await Project.create({
-    name: payload.name,
-    key: buildProjectKey(payload.name, payload.key),
+    name,
+    key,
     description: payload.description || "",
     owner: user._id,
     members: normalizeMembers(user._id, payload.members)
@@ -89,9 +146,11 @@ async function listProjects(query, user) {
     });
   }
 
-  andFilters.push({
-    $or: [{ owner: user._id }, { "members.user": user._id }]
-  });
+  if (user.role !== "admin" && user.role !== "manager") {
+    andFilters.push({
+      $or: [{ owner: user._id }, { "members.user": user._id }]
+    });
+  }
 
   const filter = andFilters.length ? { $and: andFilters } : {};
 
@@ -125,16 +184,26 @@ async function updateProject(projectId, payload, user) {
   const project = await getProjectById(projectId, user);
   assertPermission(canManageProject(project, user));
 
-  if (payload.name !== undefined) project.name = payload.name;
-  if (payload.key !== undefined) project.key = buildProjectKey(payload.key, payload.key);
+  if (payload.name !== undefined) project.name = toTitleCase(payload.name);
+  if (payload.key !== undefined) {
+    const sanitized = sanitizeExplicitKey(payload.key);
+    if (sanitized.length < 2) {
+      throw new ApiError(400, "Project key must be at least 2 letters or numbers.");
+    }
+    project.key = await ensureUniqueProjectKey(sanitized, project._id);
+  }
   if (payload.description !== undefined) project.description = payload.description;
   if (payload.status !== undefined) project.status = payload.status;
   if (payload.members !== undefined) project.members = normalizeMembers(project.owner, payload.members);
 
   if (payload.customLanes !== undefined) {
-    assertCustomLanes(payload.customLanes);
+    const titledLanes = payload.customLanes.map((lane) => ({
+      ...lane,
+      title: toTitleCase(lane.title)
+    }));
+    assertCustomLanes(titledLanes);
     const previousIds = new Set((project.customLanes || []).map((lane) => lane.id));
-    const nextIds = new Set(payload.customLanes.map((lane) => lane.id));
+    const nextIds = new Set(titledLanes.map((lane) => lane.id));
     for (const id of previousIds) {
       if (!nextIds.has(id)) {
         const remaining = await Task.countDocuments({ project: project._id, status: id });
@@ -146,7 +215,7 @@ async function updateProject(projectId, payload, user) {
         }
       }
     }
-    project.customLanes = payload.customLanes;
+    project.customLanes = titledLanes;
   }
 
   await project.save();

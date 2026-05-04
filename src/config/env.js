@@ -19,7 +19,9 @@ const env = {
     .filter(Boolean),
   REDIS_URL: process.env.REDIS_URL || "",
   RATE_LIMIT_WINDOW_MS: toNumber(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
-  RATE_LIMIT_MAX: toNumber(process.env.RATE_LIMIT_MAX, 300)
+  RATE_LIMIT_MAX: toNumber(process.env.RATE_LIMIT_MAX, 300),
+  /** If set, registering with this email (case-insensitive) assigns workspace `admin`. */
+  COMPANY_ADMIN_EMAIL: (process.env.COMPANY_ADMIN_EMAIL || "").trim().toLowerCase() || null
 };
 
 if (env.NODE_ENV === "production" && env.JWT_SECRET === "dev-only-change-this-secret") {
